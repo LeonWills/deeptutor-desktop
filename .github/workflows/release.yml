@@ -1,0 +1,138 @@
+name: Release Desktop App
+
+# Push a tag like `desktop-v1.6.15` (or run manually) to build all three
+# platforms and publish them to this repository's GitHub Releases. The
+# electron-builder publish config resolves owner/repo from GITHUB_REPOSITORY,
+# so the built apps auto-update from this repo's Releases out of the box.
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+    inputs:
+      deeptutor_ref:
+        description: "DeepTutor upstream ref (branch or tag)"
+        required: true
+        default: "main"
+      version:
+        description: "App version (e.g. 1.6.15); defaults to package.json"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            node_platform: darwin-arm64
+          - os: windows-latest
+            platform: win
+            node_platform: win-x64
+          - os: ubuntu-latest
+            platform: linux
+            node_platform: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Clone DeepTutor source
+        shell: bash
+        run: |
+          REF="${{ inputs.deeptutor_ref || 'main' }}"
+          if [ "${{ github.event_name }}" = "push" ]; then REF="main"; fi
+          git clone --depth 1 --branch "$REF" https://github.com/HKUDS/DeepTutor.git ../DeepTutor
+
+      - name: Build frontend (standalone)
+        shell: bash
+        working-directory: ../DeepTutor/web
+        run: |
+          npm ci --legacy-peer-deps
+          DEEPTUTOR_NEXT_DIST_DIR=.next-deeptutor npm run build
+          cd .next-deeptutor/standalone
+          mkdir -p .next-deeptutor
+          cp -r ../static .next-deeptutor/static
+          cp -r ../../public public
+
+      - name: Build backend binary (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $env:DEEPTUTOR_SRC = (Resolve-Path ..\DeepTutor).Path
+          powershell -ExecutionPolicy Bypass -File scripts/build-backend.ps1
+
+      - name: Build backend binary (macOS/Linux)
+        if: matrix.platform != 'win'
+        shell: bash
+        run: |
+          export DEEPTUTOR_SRC="$GITHUB_WORKSPACE/../DeepTutor"
+          bash scripts/build-backend.sh
+
+      - name: Fetch standalone Node runtime (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/fetch-node.ps1 -Platform ${{ matrix.node_platform }}
+
+      - name: Fetch standalone Node runtime (macOS/Linux)
+        if: matrix.platform != 'win'
+        shell: bash
+        run: bash scripts/fetch-node.sh ${{ matrix.node_platform }}
+
+      - name: Set app version from tag
+        shell: bash
+        run: |
+          VERSION=""
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#desktop-v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          fi
+          if [ -n "$VERSION" ]; then
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            echo "App version: $VERSION"
+          fi
+
+      - name: Install desktop dependencies
+        shell: bash
+        run: npm install
+
+      - name: Package and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx electron-builder --config electron-builder.config.js --${{ matrix.platform }} --publish always
+
+      - name: Upload artifacts (fallback)
+        if: failure() || success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deeptutor-${{ matrix.platform }}
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+            release/latest*.yml
+          if-no-files-found: ignore

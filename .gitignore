@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build intermediates and artifacts (regenerable via scripts)
+build/dist/
+build/work/
+build/node/
+build/*.spec.bak
+release/
+dist/
+
+# Development symlinks to local resource dirs
+backend
+web
+
+# OS / editor
+.DS_Store
+*.log
